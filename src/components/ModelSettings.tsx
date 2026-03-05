@@ -8,15 +8,22 @@ import {
 	hasLegacyApiKey,
 	hasGeminiLocalApiKey,
 	setGeminiLocalApiKey,
+	hasGrokLocalApiKey,
+	setGrokLocalApiKey,
 	type LLMConfig,
 	type GeminiStorageMode,
+	type GrokStorageMode,
 } from "@/lib/llm";
 import { getGeminiVault, isGeminiVaultSupported } from "@/lib/gemini-vault";
+import { getGrokVault, isGrokVaultSupported } from "@/lib/grok-vault";
 import {
 	BYOKVaultError,
 	createBrowserPasskeyAdapter,
 	getUserMessage,
 } from "byok-vault";
+
+type CloudProvider = "gemini" | "grok";
+type ProviderStorageMode = "vault" | "local";
 
 export function ModelSettings() {
 	const [isOpen, setIsOpen] = useState(false);
@@ -27,28 +34,85 @@ export function ModelSettings() {
 	const [apiKeyInput, setApiKeyInput] = useState("");
 	const [passphraseInput, setPassphraseInput] = useState("");
 	const [migratePassphrase, setMigratePassphrase] = useState("");
-	const [hasLocalKey, setHasLocalKey] = useState(false);
+	const [hasGeminiLocalKey, setHasGeminiLocalKey] = useState(false);
+	const [hasGrokLocalKey, setHasGrokLocalKey] = useState(false);
 
-	const vault = getGeminiVault();
-	const vaultState = vault?.getState() ?? "none";
-	const canUseVault = vault?.canCall() ?? false;
-	const vaultSupported = isGeminiVaultSupported();
-	const storageMode: GeminiStorageMode =
-		config.geminiStorage === "local" ? "local" : "vault";
-	const bypassEnabled = storageMode === "local";
+	const geminiVault = getGeminiVault();
+	const grokVault = getGrokVault();
+	const geminiVaultSupported = isGeminiVaultSupported();
+	const grokVaultSupported = isGrokVaultSupported();
 	const passkeySupported =
 		typeof window !== "undefined" && createBrowserPasskeyAdapter().isSupported();
-	const isPasskeyEnrolled = vault?.isPasskeyEnrolled() ?? false;
+
+	const activeProvider: CloudProvider | null =
+		config.provider === "gemini" || config.provider === "grok"
+			? config.provider
+			: null;
+	const geminiStorageMode: GeminiStorageMode =
+		config.geminiStorage === "local" ? "local" : "vault";
+	const grokStorageMode: GrokStorageMode =
+		config.grokStorage === "local" ? "local" : "vault";
+	const activeStorageMode: ProviderStorageMode =
+		activeProvider === "gemini"
+			? geminiStorageMode
+			: activeProvider === "grok"
+				? grokStorageMode
+				: "vault";
+	const activeVault =
+		activeProvider === "gemini"
+			? geminiVault
+			: activeProvider === "grok"
+				? grokVault
+				: null;
+	const activeVaultState = activeVault?.getState() ?? "none";
+	const activeCanUseVault = activeVault?.canCall() ?? false;
+	const activeVaultSupported =
+		activeProvider === "gemini"
+			? geminiVaultSupported
+			: activeProvider === "grok"
+				? grokVaultSupported
+				: false;
+	const bypassEnabled = activeStorageMode === "local";
+	const isPasskeyEnrolled = activeVault?.isPasskeyEnrolled() ?? false;
 	const needsMigration =
-		config.provider === "gemini" &&
-		storageMode === "vault" &&
+		activeProvider === "gemini" &&
+		activeStorageMode === "vault" &&
 		hasLegacyApiKey(config) &&
-		vaultState === "none";
+		activeVaultState === "none";
+	const activeHasLocalKey =
+		activeProvider === "gemini"
+			? hasGeminiLocalKey
+			: activeProvider === "grok"
+				? hasGrokLocalKey
+				: false;
+	const activeProviderLabel = activeProvider === "grok" ? "Grok" : "Gemini";
+	const activeApiKeyLink =
+		activeProvider === "grok"
+			? "https://console.x.ai/team/default/api-keys"
+			: "https://aistudio.google.com/app/apikey";
+	const activeApiKeyLinkLabel =
+		activeProvider === "grok" ? "create xAI API key \u2192" : "get a free API key \u2192";
+
+	const refreshLocalKeyFlags = () => {
+		setHasGeminiLocalKey(hasGeminiLocalApiKey());
+		setHasGrokLocalKey(hasGrokLocalApiKey());
+	};
+
+	const updateProviderStorageMode = (
+		provider: CloudProvider,
+		mode: ProviderStorageMode
+	) => {
+		setConfig((prev) =>
+			provider === "gemini"
+				? { ...prev, geminiStorage: mode }
+				: { ...prev, grokStorage: mode }
+		);
+	};
 
 	useEffect(() => {
 		setConfig(getLLMConfig());
 		setHasDefaultKey(!!process.env.NEXT_PUBLIC_HAS_GEMINI_KEY);
-		setHasLocalKey(hasGeminiLocalApiKey());
+		refreshLocalKeyFlags();
 		setApiKeyInput("");
 		setPassphraseInput("");
 		setMigratePassphrase("");
@@ -62,17 +126,22 @@ export function ModelSettings() {
 	}, []);
 
 	useEffect(() => {
-		if (config.provider !== "gemini") return;
-		if (vaultSupported || storageMode === "local") return;
-		setConfig((prev) => ({ ...prev, geminiStorage: "local" }));
-	}, [config.provider, storageMode, vaultSupported]);
+		if (config.provider === "gemini" && !geminiVaultSupported && geminiStorageMode !== "local") {
+			setConfig((prev) => ({ ...prev, geminiStorage: "local" }));
+			return;
+		}
+		if (config.provider === "grok" && !grokVaultSupported && grokStorageMode !== "local") {
+			setConfig((prev) => ({ ...prev, grokStorage: "local" }));
+		}
+	}, [config.provider, geminiStorageMode, grokStorageMode, geminiVaultSupported, grokVaultSupported]);
 
 	const canSave = (() => {
-		if (config.provider !== "gemini") return true;
-		if (hasDefaultKey) return true;
-		if (storageMode === "local") return hasLocalKey || apiKeyInput.trim().length > 0;
-		if (!vaultSupported) return false;
-		if (canUseVault) return true;
+		if (config.provider === "mlc") return true;
+		if (!activeProvider) return false;
+		if (activeProvider === "gemini" && hasDefaultKey) return true;
+		if (activeStorageMode === "local") return activeHasLocalKey || apiKeyInput.trim().length > 0;
+		if (!activeVaultSupported) return false;
+		if (activeCanUseVault) return true;
 		return (
 			apiKeyInput.trim().length > 0 &&
 			(passkeySupported || passphraseInput.length >= 8)
@@ -80,11 +149,13 @@ export function ModelSettings() {
 	})();
 
 	const handleMigrate = async () => {
-		if (!config.apiKey || migratePassphrase.length < 8 || !vault) return;
+		if (activeProvider !== "gemini" || !config.apiKey || migratePassphrase.length < 8 || !geminiVault) {
+			return;
+		}
 		setReloading(true);
 		setStatusMsg("Migrating key to vault...");
 		try {
-			await vault.importKey(config.apiKey, migratePassphrase);
+			await geminiVault.importKey(config.apiKey, migratePassphrase);
 			const { apiKey: _omit, ...safe } = config;
 			setLLMConfig(safe);
 			setConfig(safe);
@@ -104,11 +175,11 @@ export function ModelSettings() {
 	};
 
 	const handleUnlock = async () => {
-		if (!vault || passphraseInput.length < 8) return;
+		if (!activeVault || passphraseInput.length < 8) return;
 		setReloading(true);
 		setStatusMsg("Unlocking...");
 		try {
-			await vault.unlock(passphraseInput, { session: "tab" });
+			await activeVault.unlock(passphraseInput, { session: "tab" });
 			setPassphraseInput("");
 			await reloadLLM((msg) => setStatusMsg(msg));
 		} catch (e) {
@@ -124,11 +195,11 @@ export function ModelSettings() {
 	};
 
 	const handleUnlockWithPasskey = async () => {
-		if (!vault) return;
+		if (!activeVault) return;
 		setReloading(true);
 		setStatusMsg("Unlocking with fingerprint...");
 		try {
-			await vault.unlockWithPasskey({ session: "tab" });
+			await activeVault.unlockWithPasskey({ session: "tab" });
 			await reloadLLM((msg) => setStatusMsg(msg));
 		} catch (e) {
 			console.error(e);
@@ -139,21 +210,25 @@ export function ModelSettings() {
 	};
 
 	const handleLock = () => {
-		vault?.lock();
+		activeVault?.lock();
 		setConfig(getLLMConfig());
 	};
 
-	const handleResetKeys = (mode: "all" | "vault" | "local" = "all") => {
-		if (!confirm("Remove stored API key? You will need to re-enter it."))
-			return;
+	const handleResetKeys = (
+		provider: CloudProvider,
+		mode: "all" | "vault" | "local" = "all"
+	) => {
+		if (!confirm("Remove stored API key? You will need to re-enter it.")) return;
+		const selectedVault = provider === "gemini" ? geminiVault : grokVault;
 		if (mode !== "local") {
-			vault?.nuke();
+			selectedVault?.nuke();
 		}
 		if (mode !== "vault") {
-			setGeminiLocalApiKey(null);
+			if (provider === "gemini") setGeminiLocalApiKey(null);
+			else setGrokLocalApiKey(null);
 		}
 		setConfig(getLLMConfig());
-		setHasLocalKey(hasGeminiLocalApiKey());
+		refreshLocalKeyFlags();
 		setApiKeyInput("");
 		setPassphraseInput("");
 	};
@@ -161,25 +236,29 @@ export function ModelSettings() {
 	const handleSave = async () => {
 		setReloading(true);
 		setStatusMsg("Initializing...");
-		let clearLocalKeyAfterSuccess = false;
+		let clearLocalKeyAfterSuccessFor: CloudProvider | null = null;
 		try {
-			if (config.provider === "gemini") {
-				if (storageMode === "local") {
+			if (config.provider !== "mlc" && activeProvider) {
+				if (activeStorageMode === "local") {
 					if (apiKeyInput.trim()) {
-						setGeminiLocalApiKey(apiKeyInput.trim());
-						setHasLocalKey(hasGeminiLocalApiKey());
+						if (activeProvider === "gemini") {
+							setGeminiLocalApiKey(apiKeyInput.trim());
+						} else {
+							setGrokLocalApiKey(apiKeyInput.trim());
+						}
+						refreshLocalKeyFlags();
 					}
 				} else {
-					clearLocalKeyAfterSuccess = true;
-					if (apiKeyInput.trim() && vault) {
+					clearLocalKeyAfterSuccessFor = activeProvider;
+					if (apiKeyInput.trim() && activeVault) {
 						if (passkeySupported) {
-							await vault.setConfigWithPasskey(
-								{ apiKey: apiKeyInput.trim(), provider: "gemini" },
+							await activeVault.setConfigWithPasskey(
+								{ apiKey: apiKeyInput.trim(), provider: activeProvider },
 								{ rpName: "GitAsk", userName: "user" }
 							);
 						} else if (passphraseInput.length >= 8) {
-							await vault.setConfig(
-								{ apiKey: apiKeyInput.trim(), provider: "gemini" },
+							await activeVault.setConfig(
+								{ apiKey: apiKeyInput.trim(), provider: activeProvider },
 								passphraseInput
 							);
 						}
@@ -190,12 +269,17 @@ export function ModelSettings() {
 			}
 			setLLMConfig({
 				provider: config.provider,
-				geminiStorage: storageMode,
+				geminiStorage: geminiStorageMode,
+				grokStorage: grokStorageMode,
 			});
 			await reloadLLM((msg) => setStatusMsg(msg));
-			if (clearLocalKeyAfterSuccess) {
+			if (clearLocalKeyAfterSuccessFor === "gemini") {
 				setGeminiLocalApiKey(null);
-				setHasLocalKey(false);
+				setHasGeminiLocalKey(false);
+			}
+			if (clearLocalKeyAfterSuccessFor === "grok") {
+				setGrokLocalApiKey(null);
+				setHasGrokLocalKey(false);
 			}
 			setIsOpen(false);
 		} catch (e) {
@@ -211,18 +295,27 @@ export function ModelSettings() {
 	};
 
 	if (!isOpen) {
-		const isGemini = config.provider === "gemini";
+		const dotColor =
+			config.provider === "gemini"
+				? "#a78bfa"
+				: config.provider === "grok"
+					? "#f59e0b"
+					: "var(--success)";
+		const modeLabel =
+			config.provider === "mlc" ? "local" : config.provider;
 		return (
 			<button
 				onClick={() => setIsOpen(true)}
 				style={styles.settingsBtn}
 				aria-label="Model settings"
 			>
-				<span style={{
-					...styles.dot,
-					background: isGemini ? "#a78bfa" : "var(--success)",
-				}} />
-				{isGemini ? "gemini" : "local"}
+				<span
+					style={{
+						...styles.dot,
+						background: dotColor,
+					}}
+				/>
+				{modeLabel}
 			</button>
 		);
 	}
@@ -239,37 +332,51 @@ export function ModelSettings() {
 				<div style={styles.toggleRow}>
 					<button
 						style={{ ...styles.toggleBtn, ...(config.provider === "mlc" ? styles.toggleBtnActive : {}) }}
-						onClick={() => setConfig({ ...config, provider: "mlc" })}
+						onClick={() => setConfig((prev) => ({ ...prev, provider: "mlc" }))}
 					>
 						local
 					</button>
 					<button
 						style={{ ...styles.toggleBtn, ...(config.provider === "gemini" ? styles.toggleBtnActive : {}) }}
 						onClick={() =>
-							setConfig({
-								...config,
+							setConfig((prev) => ({
+								...prev,
 								provider: "gemini",
-								geminiStorage: storageMode === "local" ? "local" : "vault",
-							})
+								geminiStorage: prev.geminiStorage === "local" ? "local" : "vault",
+							}))
 						}
 					>
 						gemini
+					</button>
+					<button
+						style={{ ...styles.toggleBtn, ...(config.provider === "grok" ? styles.toggleBtnActive : {}) }}
+						onClick={() =>
+							setConfig((prev) => ({
+								...prev,
+								provider: "grok",
+								grokStorage: prev.grokStorage === "local" ? "local" : "vault",
+							}))
+						}
+					>
+						grok
 					</button>
 				</div>
 				<p style={styles.hint}>
 					{config.provider === "mlc" ? (
 						<>runs in your browser via{" "}
 							<a href="https://github.com/mlc-ai/web-llm" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>web-llm</a>
-							{" "}— needs WebGPU + ~4GB VRAM, downloads once</>
+							{" "}\u2014 needs WebGPU + ~4GB VRAM, downloads once</>
+					) : config.provider === "gemini" ? (
+						"google cloud, fast, no download \u2014 needs your API key"
 					) : (
-						"google cloud, fast, no download — needs your API key"
+						"xAI grok cloud, fast, no download \u2014 needs your API key"
 					)}
 				</p>
 
-				{/* Gemini key fields */}
-				{config.provider === "gemini" && (
+				{/* Cloud key fields */}
+				{activeProvider && (
 					<div style={styles.geminiSection}>
-						{hasDefaultKey && (
+						{activeProvider === "gemini" && hasDefaultKey && (
 							<p style={styles.hint}>a shared key is set up. add your own key for better rate limits.</p>
 						)}
 
@@ -284,15 +391,16 @@ export function ModelSettings() {
 									style={{
 										...styles.switchBtn,
 										...(bypassEnabled ? styles.switchBtnOn : {}),
-										...(!vaultSupported ? styles.switchBtnDisabled : {}),
+										...(!activeVaultSupported ? styles.switchBtnDisabled : {}),
 									}}
-									onClick={() =>
-										setConfig((prev) => ({
-											...prev,
-											geminiStorage: bypassEnabled ? "vault" : "local",
-										}))
-									}
-									disabled={!vaultSupported}
+									onClick={() => {
+										if (!activeProvider) return;
+										updateProviderStorageMode(
+											activeProvider,
+											bypassEnabled ? "vault" : "local"
+										);
+									}}
+									disabled={!activeVaultSupported}
 								>
 									<span
 										style={{
@@ -305,7 +413,7 @@ export function ModelSettings() {
 									style={{
 										...styles.switchState,
 										...(bypassEnabled ? styles.switchStateOn : {}),
-										...(!vaultSupported ? styles.switchStateDisabled : {}),
+										...(!activeVaultSupported ? styles.switchStateDisabled : {}),
 									}}
 								>
 									{bypassEnabled ? "ON" : "OFF"}
@@ -326,17 +434,17 @@ export function ModelSettings() {
 								</p>
 							) : (
 								<p style={styles.warningHint}>
-									local fallback stores your Gemini key in browser localStorage (less secure).
+									local fallback stores your {activeProviderLabel} key in browser localStorage (less secure).
 								</p>
 							)}
-							{!vaultSupported && (
+							{!activeVaultSupported && (
 								<p style={styles.warningHint}>
 									encrypted vault is not available in this browser. bypass is forced on.
 								</p>
 							)}
 						</div>
 
-						{storageMode === "vault" && needsMigration && (
+						{needsMigration && (
 							<div style={styles.field}>
 								<label style={styles.label}>secure your existing key</label>
 								<input
@@ -352,10 +460,10 @@ export function ModelSettings() {
 							</div>
 						)}
 
-						{storageMode === "vault" && !needsMigration && vaultState === "none" && (
+						{activeStorageMode === "vault" && !needsMigration && activeVaultState === "none" && (
 							<div style={styles.field}>
-								<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" style={styles.accentLink}>
-									get a free API key →
+								<a href={activeApiKeyLink} target="_blank" rel="noopener noreferrer" style={styles.accentLink}>
+									{activeApiKeyLinkLabel}
 								</a>
 								<input
 									type="password"
@@ -376,22 +484,28 @@ export function ModelSettings() {
 							</div>
 						)}
 
-						{storageMode === "local" && (
+						{activeStorageMode === "local" && (
 							<div style={styles.field}>
-								<a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" style={styles.accentLink}>
-									get a free API key →
+								<a href={activeApiKeyLink} target="_blank" rel="noopener noreferrer" style={styles.accentLink}>
+									{activeApiKeyLinkLabel}
 								</a>
 								<input
 									type="password"
-									placeholder={hasLocalKey ? "replace local API key (optional)" : "paste API key"}
+									placeholder={activeHasLocalKey ? "replace local API key (optional)" : "paste API key"}
 									value={apiKeyInput}
 									onChange={(e) => setApiKeyInput(e.target.value)}
 									style={styles.input}
 								/>
-								{hasLocalKey && (
+								{activeHasLocalKey && (
 									<div style={{ display: "flex", gap: 8 }}>
 										<p style={{ ...styles.hint, color: "var(--success)", flex: 1 }}>local key saved</p>
-										<button onClick={() => handleResetKeys("local")} style={styles.cancelBtn}>
+										<button
+											onClick={() => {
+												if (!activeProvider) return;
+												handleResetKeys(activeProvider, "local");
+											}}
+											style={styles.cancelBtn}
+										>
 											remove key
 										</button>
 									</div>
@@ -399,7 +513,7 @@ export function ModelSettings() {
 							</div>
 						)}
 
-						{storageMode === "vault" && vaultState === "locked" && !needsMigration && (
+						{activeStorageMode === "vault" && activeVaultState === "locked" && !needsMigration && (
 							<div style={styles.field}>
 								{isPasskeyEnrolled ? (
 									<button onClick={handleUnlockWithPasskey} style={styles.saveBtn} disabled={reloading}>
@@ -422,12 +536,20 @@ export function ModelSettings() {
 							</div>
 						)}
 
-						{storageMode === "vault" && vaultState === "unlocked" && (
+						{activeStorageMode === "vault" && activeVaultState === "unlocked" && (
 							<div style={styles.field}>
 								<p style={{ ...styles.hint, color: "var(--success)" }}>key saved</p>
 								<div style={{ display: "flex", gap: 8 }}>
 									<button onClick={handleLock} style={styles.cancelBtn}>lock</button>
-									<button onClick={() => handleResetKeys("vault")} style={styles.cancelBtn}>remove key</button>
+									<button
+										onClick={() => {
+											if (!activeProvider) return;
+											handleResetKeys(activeProvider, "vault");
+										}}
+										style={styles.cancelBtn}
+									>
+										remove key
+									</button>
 								</div>
 							</div>
 						)}

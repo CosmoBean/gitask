@@ -24,9 +24,9 @@ export interface ContextAssemblyLimits {
 }
 
 export function defaultLimitsForProvider(
-	provider: "gemini" | "mlc"
+	provider: "gemini" | "grok" | "mlc"
 ): ContextAssemblyLimits {
-	if (provider === "gemini") {
+	if (provider === "gemini" || provider === "grok") {
 		return {
 			maxChars: 300_000,
 			maxTokens: 75_000,

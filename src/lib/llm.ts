@@ -1,23 +1,27 @@
 /**
  * LLM wrapper — provides a unified interface to WebLLM and Gemini.
  *
- * Supports switching between local WebGPU inference (MLC) and cloud inference (Gemini).
- * Gemini BYOK keys can be stored encrypted (vault) or plain local (fallback).
+ * Supports switching between local WebGPU inference (MLC) and cloud inference
+ * providers (Gemini / Grok).
+ * BYOK keys can be stored encrypted (vault) or plain local (fallback).
  */
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { getGeminiVault } from "./gemini-vault";
+import { getGrokVault } from "./grok-vault";
 import { detectWebGPUAvailability } from "./webgpu";
 import { recordLLM } from "./metrics";
 
 export type LLMStatus = "idle" | "loading" | "ready" | "generating" | "error";
 
-export type LLMProvider = "mlc" | "gemini";
+export type LLMProvider = "mlc" | "gemini" | "grok";
 export type GeminiStorageMode = "vault" | "local";
+export type GrokStorageMode = "vault" | "local";
 
 export interface LLMConfig {
 	provider: LLMProvider;
 	geminiStorage?: GeminiStorageMode;
+	grokStorage?: GrokStorageMode;
 	/** @deprecated For legacy migration only; BYOK keys now in vault */
 	apiKey?: string;
 }
@@ -52,6 +56,43 @@ function normalizeGeminiError(err: unknown): Error {
 	return new Error(message);
 }
 
+function normalizeGrokError(err: unknown): Error {
+	const message = err instanceof Error ? err.message : String(err);
+	const lower = message.toLowerCase();
+
+	if (
+		lower.includes("invalid api key") ||
+		lower.includes("api_key_invalid") ||
+		lower.includes("unauthorized") ||
+		lower.includes("authentication")
+	) {
+		return new Error(
+			"Grok API key is invalid or rejected. Open LLM Settings and update your key."
+		);
+	}
+
+	if (
+		lower.includes("permission") ||
+		lower.includes("forbidden")
+	) {
+		return new Error(
+			"Grok request was denied. Check your API key permissions in LLM Settings."
+		);
+	}
+
+	if (
+		lower.includes("rate limit") ||
+		lower.includes("quota") ||
+		lower.includes("429")
+	) {
+		return new Error(
+			"Grok API rate limit or quota exceeded. Wait a moment and try again."
+		);
+	}
+
+	return new Error(message);
+}
+
 function normalizeMLCInitError(err: unknown): Error {
 	const message = err instanceof Error ? err.message : String(err);
 	const lower = message.toLowerCase();
@@ -62,11 +103,11 @@ function normalizeMLCInitError(err: unknown): Error {
 		lower.includes("adapter")
 	) {
 		return new Error(
-			"Local Web-LLM is unavailable in this browser. Open LLM Settings, switch to Gemini, and add your API key."
+			"Local Web-LLM is unavailable in this browser. Open LLM Settings, switch to Gemini or Grok, and add your API key."
 		);
 	}
 	return new Error(
-		`Failed to initialize local Web-LLM: ${message}. Switch to Gemini in LLM Settings if this continues.`
+		`Failed to initialize local Web-LLM: ${message}. Switch to Gemini or Grok in LLM Settings if this continues.`
 	);
 }
 
@@ -127,8 +168,13 @@ export function getLLMStatus(): LLMStatus {
 
 const STORAGE_KEY = "gitask_llm_config";
 const GEMINI_LOCAL_KEY_STORAGE = "gitask_gemini_api_key_local";
+const GROK_LOCAL_KEY_STORAGE = "gitask_grok_api_key_local";
 
 function normalizeGeminiStorageMode(value: unknown): GeminiStorageMode {
+	return value === "local" ? "local" : "vault";
+}
+
+function normalizeGrokStorageMode(value: unknown): GrokStorageMode {
 	return value === "local" ? "local" : "vault";
 }
 
@@ -162,6 +208,36 @@ export function setGeminiLocalApiKey(apiKey: string | null): void {
 	}
 }
 
+export function getGrokLocalApiKey(): string | null {
+	if (typeof window === "undefined") return null;
+	let key: string | null = null;
+	try {
+		key = localStorage.getItem(GROK_LOCAL_KEY_STORAGE);
+	} catch {
+		return null;
+	}
+	if (!key) return null;
+	return key.trim().length > 0 ? key : null;
+}
+
+export function hasGrokLocalApiKey(): boolean {
+	return !!getGrokLocalApiKey();
+}
+
+export function setGrokLocalApiKey(apiKey: string | null): void {
+	if (typeof window === "undefined") return;
+	const next = apiKey?.trim() ?? "";
+	try {
+		if (!next) {
+			localStorage.removeItem(GROK_LOCAL_KEY_STORAGE);
+			return;
+		}
+		localStorage.setItem(GROK_LOCAL_KEY_STORAGE, next);
+	} catch {
+		// Ignore localStorage failures in restricted browser modes.
+	}
+}
+
 export function getLLMConfig(): LLMConfig {
 	// 1. Try to load from localStorage
 	if (typeof window !== "undefined") {
@@ -169,10 +245,17 @@ export function getLLMConfig(): LLMConfig {
 			const stored = localStorage.getItem(STORAGE_KEY);
 			if (stored) {
 				const parsed = JSON.parse(stored) as Partial<LLMConfig>;
-				const provider: LLMProvider = parsed.provider === "gemini" ? "gemini" : "mlc";
+				const provider: LLMProvider =
+					parsed.provider === "gemini"
+						? "gemini"
+						: parsed.provider === "grok"
+							? "grok"
+							: "mlc";
 				const baseConfig: LLMConfig = { provider };
 				if (provider === "gemini") {
 					baseConfig.geminiStorage = normalizeGeminiStorageMode(parsed.geminiStorage);
+				} else if (provider === "grok") {
+					baseConfig.grokStorage = normalizeGrokStorageMode(parsed.grokStorage);
 				}
 				if (typeof parsed.apiKey === "string" && parsed.apiKey.trim().length > 0) {
 					baseConfig.apiKey = parsed.apiKey;
@@ -204,10 +287,17 @@ export function hasLegacyApiKey(config: LLMConfig): boolean {
 export function setLLMConfig(config: LLMConfig) {
 	if (typeof window === "undefined") return;
 	const safeConfig: LLMConfig = {
-		provider: config.provider === "gemini" ? "gemini" : "mlc",
+		provider:
+			config.provider === "gemini"
+				? "gemini"
+				: config.provider === "grok"
+					? "grok"
+					: "mlc",
 	};
 	if (safeConfig.provider === "gemini") {
 		safeConfig.geminiStorage = normalizeGeminiStorageMode(config.geminiStorage);
+	} else if (safeConfig.provider === "grok") {
+		safeConfig.grokStorage = normalizeGrokStorageMode(config.grokStorage);
 	}
 	try {
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(safeConfig));
@@ -511,6 +601,189 @@ class GeminiEngineWrapper implements LLMEngine {
 	}
 }
 
+// ─── Grok Implementation ────────────────────────────────────────────────────
+
+const GROK_API_URL = "https://api.x.ai/v1/chat/completions";
+const GROK_MODEL_ID = "grok-4-1-fast-reasoning";
+
+type GrokChatMessage = {
+	role: "system" | "user" | "assistant";
+	content: string;
+};
+
+class GrokEngineWrapper implements LLMEngine {
+	private vault: BYOKVaultRef | null;
+	private apiKey: string | null;
+	/** Stash actual token counts when provided by API */
+	lastUsage: { tokensIn?: number; tokensOut?: number } | null = null;
+
+	constructor(vaultOrApiKey: { vault: BYOKVaultRef } | { apiKey: string }) {
+		if ("vault" in vaultOrApiKey) {
+			this.vault = vaultOrApiKey.vault;
+			this.apiKey = null;
+		} else {
+			this.vault = null;
+			this.apiKey = vaultOrApiKey.apiKey;
+		}
+	}
+
+	private toGrokMessages(messages: ChatMessage[]): GrokChatMessage[] {
+		return messages
+			.filter((message) => message.content.trim().length > 0)
+			.map((message) => ({
+				role: message.role,
+				content: message.content,
+			}));
+	}
+
+	private parseSSELine(line: string): {
+		token?: string;
+		done?: boolean;
+		tokensIn?: number;
+		tokensOut?: number;
+	} {
+		if (!line.startsWith("data:")) return {};
+		const data = line.slice(5).trim();
+		if (!data) return {};
+		if (data === "[DONE]") return { done: true };
+		let parsed: {
+			error?: { message?: string };
+			choices?: Array<{ delta?: { content?: string } }>;
+			usage?: { prompt_tokens?: number; completion_tokens?: number };
+		};
+		try {
+			parsed = JSON.parse(data) as typeof parsed;
+		} catch {
+			return {};
+		}
+		if (parsed.error?.message) {
+			throw normalizeGrokError(new Error(parsed.error.message));
+		}
+		return {
+			token: parsed.choices?.[0]?.delta?.content,
+			tokensIn: parsed.usage?.prompt_tokens,
+			tokensOut: parsed.usage?.completion_tokens,
+		};
+	}
+
+	private async collectGrokStream(
+		messages: ChatMessage[],
+		apiKey: string
+	): Promise<{ chunks: string[]; tokensIn?: number; tokensOut?: number }> {
+		const response = await fetch(GROK_API_URL, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${apiKey}`,
+			},
+			body: JSON.stringify({
+				model: GROK_MODEL_ID,
+				messages: this.toGrokMessages(messages),
+				temperature: 0.3,
+				max_tokens: 1024,
+				stream: true,
+			}),
+		});
+
+		if (!response.ok) {
+			const details = await extractErrorText(response);
+			throw normalizeGrokError(
+				new Error(`Grok API request failed (${response.status}): ${details}`)
+			);
+		}
+		if (!response.body) {
+			throw normalizeGrokError(new Error("No response body"));
+		}
+
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		const chunks: string[] = [];
+		let tokensIn: number | undefined;
+		let tokensOut: number | undefined;
+		let buffer = "";
+
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) {
+					buffer += decoder.decode();
+					break;
+				}
+				buffer += decoder.decode(value, { stream: true });
+
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline).trim();
+					buffer = buffer.slice(newline + 1);
+					if (line.length > 0) {
+						const frame = this.parseSSELine(line);
+						if (typeof frame.token === "string" && frame.token.length > 0) {
+							chunks.push(frame.token);
+						}
+						if (typeof frame.tokensIn === "number") tokensIn = frame.tokensIn;
+						if (typeof frame.tokensOut === "number") tokensOut = frame.tokensOut;
+						if (frame.done) break;
+					}
+					newline = buffer.indexOf("\n");
+				}
+			}
+		} catch (err) {
+			throw normalizeGrokError(err);
+		}
+
+		for (const rawLine of buffer.split("\n")) {
+			const line = rawLine.trim();
+			if (!line) continue;
+			const frame = this.parseSSELine(line);
+			if (typeof frame.token === "string" && frame.token.length > 0) {
+				chunks.push(frame.token);
+			}
+			if (typeof frame.tokensIn === "number") tokensIn = frame.tokensIn;
+			if (typeof frame.tokensOut === "number") tokensOut = frame.tokensOut;
+		}
+
+		return { chunks, tokensIn, tokensOut };
+	}
+
+	async *generateStream(
+		messages: ChatMessage[]
+	): AsyncGenerator<string, void, undefined> {
+		if (this.apiKey) {
+			this.lastUsage = null;
+			const result = await this.collectGrokStream(messages, this.apiKey);
+			this.lastUsage = { tokensIn: result.tokensIn, tokensOut: result.tokensOut };
+			for (const chunk of result.chunks) {
+				yield chunk;
+			}
+			return;
+		}
+
+		if (!this.vault) throw new Error("Vault not configured");
+		this.lastUsage = null;
+		const runWithKey = (apiKey: string) => this.collectGrokStream(messages, apiKey);
+		const result = await this.vault.withKeyScope(async () =>
+			this.vault!.withKey(runWithKey)
+		);
+		this.lastUsage = { tokensIn: result.tokensIn, tokensOut: result.tokensOut };
+		for (const chunk of result.chunks) {
+			yield chunk;
+		}
+	}
+
+	async generateFull(messages: ChatMessage[]): Promise<string> {
+		let fullText = "";
+		for await (const chunk of this.generateStream(messages)) {
+			fullText += chunk;
+		}
+		return fullText;
+	}
+
+	async dispose(): Promise<void> {
+		this.vault = null;
+		this.apiKey = null;
+	}
+}
+
 // ─── Initialization ─────────────────────────────────────────────────────────
 
 /**
@@ -554,6 +827,29 @@ export async function initLLM(
 					);
 				}
 				onProgress?.("Gemini Ready");
+			} else if (config.provider === "grok") {
+				const vault = getGrokVault();
+				const storageMode = normalizeGrokStorageMode(config.grokStorage);
+				const localKey = storageMode === "local" ? getGrokLocalApiKey() : null;
+				const canUseVault = vault?.canCall();
+
+				if (localKey) {
+					onProgress?.("Initializing Grok (Local Key)...");
+					activeEngine = new GrokEngineWrapper({ apiKey: localKey });
+				} else if (canUseVault && vault) {
+					onProgress?.("Initializing Grok (Custom Key)...");
+					activeEngine = new GrokEngineWrapper({ vault });
+				} else {
+					const state = vault?.getState();
+					throw new Error(
+						storageMode === "local"
+							? "Add your Grok API key in LLM Settings."
+							: state === "locked"
+								? "Please unlock your Grok API key in Settings."
+								: "Add a Grok API key in Settings."
+					);
+				}
+				onProgress?.("Grok Ready");
 			} else {
 				// Default to MLC
 				try {
@@ -627,7 +923,7 @@ export async function* generate(
 		throw new Error("LLM not initialised. Call initLLM() first.");
 
 	const config = getLLMConfig();
-	const provider = config.provider === "gemini" ? "gemini" as const : "mlc" as const;
+	const provider = config.provider;
 
 	// Estimate input tokens from message content (chars / 4)
 	const totalInputChars = messages.reduce((sum, m) => sum + m.content.length, 0);
@@ -647,9 +943,12 @@ export async function* generate(
 		const durationMs = performance.now() - startTime;
 		setStatus("ready");
 
-		// Check if the engine stashed actual token counts (BYOK Gemini path)
-		const geminiEngine = activeEngine instanceof GeminiEngineWrapper ? activeEngine : null;
-		const actualUsage = geminiEngine?.lastUsage;
+		// Check if the engine stashed actual token counts (Gemini/Grok BYOK path)
+		const usageAwareEngine =
+			activeEngine instanceof GeminiEngineWrapper || activeEngine instanceof GrokEngineWrapper
+				? activeEngine
+				: null;
+		const actualUsage = usageAwareEngine?.lastUsage;
 
 		if (actualUsage?.tokensIn != null || actualUsage?.tokensOut != null) {
 			recordLLM(

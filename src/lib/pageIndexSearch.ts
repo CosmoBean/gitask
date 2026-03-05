@@ -1,7 +1,7 @@
 /**
  * PageIndex Search
  *
- * LLM-navigated (Gemini) or keyword-scored (MLC fallback) tree search.
+ * LLM-navigated (cloud providers) or keyword-scored (MLC fallback) tree search.
  * Traverses root → dir → file using 2 LLM calls, then retrieves chunks
  * for the selected files.
  *
@@ -120,9 +120,9 @@ function mlcKeywordSearch(
 }
 
 /**
- * Gemini path: 2 LLM calls to navigate root → dir → file → chunks.
+ * Cloud path: 2 LLM calls to navigate root → dir → file → chunks.
  */
-async function geminiLLMSearch(
+async function cloudLLMSearch(
 	tree: PageIndexTree,
 	store: VectorStore,
 	query: string
@@ -228,8 +228,8 @@ ${fileLines.join("\n")}`;
 }
 
 /**
- * Main entry point: run PageIndex search using either the Gemini LLM navigator
- * or the MLC keyword-scoring fallback.
+ * Main entry point: run PageIndex search using either the cloud LLM navigator
+ * (Gemini/Grok) or the MLC keyword-scoring fallback.
  */
 export async function pageIndexSearch(
 	tree: PageIndexTree,
@@ -237,8 +237,8 @@ export async function pageIndexSearch(
 	query: string,
 	provider: LLMProvider
 ): Promise<{ results: SearchResult[]; navPath: string[] }> {
-	if (provider === "gemini") {
-		return geminiLLMSearch(tree, store, query);
+	if (provider !== "mlc") {
+		return cloudLLMSearch(tree, store, query);
 	}
 	return mlcKeywordSearch(tree, store, query);
 }

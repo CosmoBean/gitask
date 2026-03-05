@@ -208,7 +208,14 @@ export default function MetricsPage() {
     totals && totals.llmCalls > 0
       ? Math.round((totals.geminiCalls / totals.llmCalls) * 100)
       : 0;
-  const mlcPct = totals && totals.llmCalls > 0 ? 100 - geminiPct : 0;
+  const grokPct =
+    totals && totals.llmCalls > 0
+      ? Math.round((totals.grokCalls / totals.llmCalls) * 100)
+      : 0;
+  const mlcPct =
+    totals && totals.llmCalls > 0
+      ? Math.max(0, 100 - geminiPct - grokPct)
+      : 0;
   const totalTokens =
     totals ? totals.totalTokensIn + totals.totalTokensOut : 0;
   const inPct =
@@ -265,6 +272,13 @@ export default function MetricsPage() {
                 max={100}
                 detail={`${geminiPct}%  (${totals.geminiCalls} calls)`}
                 color="var(--accent)"
+              />
+              <BarRow
+                label="Grok"
+                value={grokPct}
+                max={100}
+                detail={`${grokPct}%  (${totals.grokCalls} calls)`}
+                color="#f59e0b"
               />
               <BarRow
                 label="MLC"
